@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Driver Navigation Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Full-screen map layer -->
+        <canvas id="nav-map"></canvas>
+        
+        <!-- Legend Overlay -->
+        <div class="overlay bottom-left map-info-overlay" id="map-info-overlay"></div>
+
+        <!-- Top Left overlay: Branding & Status -->
+        <div class="overlay top-left hud-header glass-panel">
+            <div class="hud-brand">
+                <div class="pulse-dot" id="status-dot"></div>
+                <h1>Driver HUD</h1>
+            </div>
+            <div class="hud-badges">
+                <div class="badge">Vehicle: <strong id="vehicle-id">—</strong></div>
+                <div class="badge">V2V: <strong id="v2v-status" class="status-online">Connected</strong></div>
+            </div>
+        </div>
+
+        <!-- Left overlay: Route Planner & Navigation Instructions -->
+        <div class="overlay mid-left glass-panel flex-col route-container scrollable-y">
+            <!-- Route Planner -->
+            <div class="route-planner" id="route-planner">
+                <h3>Navigation Planner</h3>
+                <div class="route-field">
+                    <label>Origin</label>
+                    <select id="origin-select"><option value="">Loading edges...</option></select>
+                </div>
+                <div class="route-field">
+                    <label>Destination</label>
+                    <select id="dest-select"><option value="">Loading edges...</option></select>
+                </div>
+                <button id="plan-route-btn" class="plan-btn">Start Navigation</button>
+                <button id="random-trip-btn" class="plan-btn random-btn">🎲 Random Trip</button>
+                <div id="route-result"></div>
+            </div>
+            
+            <hr class="divider">
+            
+            <!-- Immediate Turn Info -->
+            <div class="primary-nav">
+                <div class="nav-icon-wrap" id="nav-icon">📍</div>
+                <div class="nav-details">
+                    <div class="nav-action" id="nav-action">Awaiting Route</div>
+                    <div class="nav-road" id="nav-road">...</div>
+                    <div class="nav-metrics">
+                        <span class="highlight-metric" id="metric-dist">— m</span> 
+                        <span class="muted-metric">• <span id="metric-eta">— s</span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Steps List for upcoming turns -->
+            <div class="steps-list" id="steps-list"></div>
+        </div>
+
+        <!-- Map Controls overlay -->
+        <div class="overlay mid-right map-controls flex-col">
+            <button id="map-zoom-in" class="map-btn shadow-btn" title="Zoom In">＋</button>
+            <button id="map-zoom-out" class="map-btn shadow-btn" title="Zoom Out">−</button>
+            <button id="map-center" class="map-btn shadow-btn" title="Center on Vehicle">⊕</button>
+        </div>
+
+        <!-- Bottom right overlay: Speed & Congestion Gauge -->
+        <div class="overlay bottom-right glass-panel gauge-container">
+            <div class="speed-display">
+                <div class="speed-value" id="speed-value">0</div>
+                <div class="speed-unit">km/h</div>
+            </div>
+            <div class="congestion-bar-wrap">
+                <div class="congestion-label">
+                    <span>Congestion</span>
+                    <span id="congestion-level" class="fw-bold text-success">—</span>
+                </div>
+                <div class="congestion-bar">
+                    <div class="congestion-fill" id="congestion-fill" style="width:0%"></div>
+                </div>
+            </div>
+            <div class="lane-info" id="lane-info">Waiting for data...</div>
+        </div>
+
+        <!-- Bottom Centered overlay: Playback controls -->
+        <div class="overlay bottom-center glass-panel playback-bar">
+            <button id="play-btn">▶ Play</button>
+            <select id="speed-select">
+                <option value="1">1×</option><option value="2">2×</option><option value="5">5×</option><option value="10">10×</option>
+            </select>
+            <input type="range" id="time-slider" min="0" max="1000" step="0.5" value="0">
+            <span class="time-display" id="time-display">T = 0</span>
+        </div>
+    </div>
+    
+    <!-- Fullscreen Reconnecting overlay -->
+    <div id="reconnect-overlay" class="reconnect-overlay">
+        <div class="reconnect-spinner"></div>
+        <h2>Connecting to Server...</h2>
+        <p id="reconnect-msg">Looking for V2V Backend on port 8000</p>
+    </div>
+
+    <!-- Alert container (replaces the panel with a floating toast notification approach) -->
+    <div id="v2v-toast-container" class="toast-container"></div>
+
+    <script src="assets/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# ── Data files (too large for GitHub) ──
+data/simulation/*.xml
+data/simulation/*.csv
+data/simulation/*.osm
+data/simulation/*.part
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.env/
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ──
+*.log

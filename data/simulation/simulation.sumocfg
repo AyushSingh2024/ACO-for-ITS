@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <input>
+        <net-file value="network.net.xml"/>
+        <route-files value="routes.rou.xml"/>
+    </input>
+    
+    <time>
+        <begin value="0"/>
+        <end value="7200"/>
+    </time>
+    
+    <output>
+        <fcd-output value="trajectories.xml"/>
+        <tripinfo-output value="tripinfo.xml"/>
+        <summary-output value="summary.xml"/>
+    </output>
+    
+    <processing>
+        <time-to-teleport value="300"/>
+        <collision.action value="warn"/>
+    </processing>
+</configuration>
