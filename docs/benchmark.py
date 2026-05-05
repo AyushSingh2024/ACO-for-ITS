@@ -1,700 +1,491 @@
 """
-Algorithm Comparison Benchmark
-================================
-Compares ACO vs Dijkstra vs Bellman-Ford vs A* on the real ACO-ITS road network.
-Metrics: execution time, path cost (travel time), path length (edges).
+Algorithm Comparison Benchmark (Congestion-Aware)
+==================================================
+Compares ACO vs Dijkstra vs Bellman-Ford vs A* using REAL congestion
+data from the 881MB trajectories_full.csv dataset.
 
-Usage:
-    From project root:
-        python docs/benchmark.py
-
-Output:
-    docs/figures/  — PNG chart files
+Usage:  python docs/benchmark.py
+Output: docs/figures/*.png
 """
-
-import os
-import sys
-import time
-import random
-import heapq
-import math
+import os, sys, time, random, heapq, math
 import xml.etree.ElementTree as ET
-from collections import defaultdict
-
+from collections import defaultdict, deque
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+# ── Paths ──
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NET_PATH    = os.path.join(ROOT, 'data', 'simulation', 'network.net.xml')
+NET_PATH = os.path.join(ROOT, 'data', 'simulation', 'network.net.xml')
 ROUTES_PATH = os.path.join(ROOT, 'data', 'simulation', 'routes.rou.xml')
-FIG_DIR     = os.path.join(ROOT, 'docs', 'figures')
+TRAJ_PATH = os.path.join(ROOT, 'data', 'simulation', 'trajectories_full.csv')
+FIG_DIR = os.path.join(ROOT, 'docs', 'figures')
 os.makedirs(FIG_DIR, exist_ok=True)
 
-# ── Styling ──────────────────────────────────────────────────────────────────
-COLORS = {
-    'ACO':          '#38bdf8',   # cyan-blue
-    'Dijkstra':     '#34d399',   # green
-    'Bellman-Ford': '#fbbf24',   # amber
-    'A*':           '#c084fc',   # purple
-}
+# ── Style ──
+COLORS = {'ACO': '#38bdf8', 'Dijkstra': '#34d399', 'Bellman-Ford': '#fbbf24', 'A*': '#c084fc'}
 plt.rcParams.update({
-    'figure.facecolor': '#0a0f1e',
-    'axes.facecolor':   '#0f172a',
-    'axes.edgecolor':   '#1e293b',
-    'axes.labelcolor':  '#94a3b8',
-    'text.color':       '#f1f5f9',
-    'xtick.color':      '#64748b',
-    'ytick.color':      '#64748b',
-    'grid.color':       '#1e293b',
-    'grid.linestyle':   '--',
-    'font.family':      'DejaVu Sans',
-    'figure.dpi':       120,
+    'figure.facecolor': '#0a0f1e', 'axes.facecolor': '#0f172a',
+    'axes.edgecolor': '#1e293b', 'axes.labelcolor': '#94a3b8',
+    'text.color': '#f1f5f9', 'xtick.color': '#64748b', 'ytick.color': '#64748b',
+    'grid.color': '#1e293b', 'grid.linestyle': '--',
+    'font.family': 'DejaVu Sans', 'figure.dpi': 150,
 })
 
-N_OD_PAIRS   = 30    # number of origin-destination pairs to benchmark
-ACO_N_ANTS   = 20    # ants per ACO run
-ACO_RUNS     = 5     # full ACO cycles per OD pair (deposit+evaporate)
-ALPHA        = 1.0
-BETA         = 2.0
-EVAPORATION  = 0.1
-Q            = 100.0
-INIT_PH      = 1.0
-BASE_SPEED   = 13.89  # m/s ≈ 50 km/h
-RANDOM_SEED  = 42
+# ── Config ──
+N_OD = 30; ACO_ANTS = 20; ACO_RUNS = 8; ALPHA = 1.0; BETA = 3.5
+EVAP = 0.20; Q = 150.0; INIT_PH = 1.0; BASE_SPEED = 13.89
+ELITE_WEIGHT = 3.0
+SEED = 42
+random.seed(SEED); np.random.seed(SEED)
 
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
+# ═══════════════════ DATA LOADING ═══════════════════
 
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  NETWORK LOADING                                         ║
-# ╚══════════════════════════════════════════════════════════╝
-
-def load_network(net_path):
-    """Returns edge_lengths, edge_centroids, graph (adjacency)."""
+def load_network(path):
     print("Loading network XML...")
-    tree = ET.parse(net_path)
-    root = tree.getroot()
-
-    edge_lengths  = {}
-    edge_centroids = {}   # edge_id -> (cx, cy)
-
+    tree = ET.parse(path); root = tree.getroot()
+    lengths, centroids = {}, {}
     for edge in root.findall('edge'):
         eid = edge.get('id', '')
-        if eid.startswith(':'):
-            continue
+        if eid.startswith(':'): continue
         for lane in edge.findall('lane'):
-            length = float(lane.get('length', 100.0))
-            edge_lengths[eid] = length
-            shape_str = lane.get('shape', '')
-            coords = shape_str.split()
+            lengths[eid] = float(lane.get('length', 100.0))
             pts = []
-            for c in coords:
-                parts = c.split(',')
-                if len(parts) >= 2:
-                    try:
-                        pts.append((float(parts[0]), float(parts[1])))
-                    except ValueError:
-                        pass
+            for c in lane.get('shape', '').split():
+                p = c.split(',')
+                if len(p) >= 2:
+                    try: pts.append((float(p[0]), float(p[1])))
+                    except: pass
             if pts:
-                cx = sum(p[0] for p in pts) / len(pts)
-                cy = sum(p[1] for p in pts) / len(pts)
-                edge_centroids[eid] = (cx, cy)
-            break  # one lane per edge
+                centroids[eid] = (sum(p[0] for p in pts)/len(pts), sum(p[1] for p in pts)/len(pts))
+            break
+    print(f"  {len(lengths)} edges loaded.")
+    return lengths, centroids
 
-    print(f"  Loaded {len(edge_lengths)} edges.")
-    return edge_lengths, edge_centroids
-
-
-def load_routes(routes_path, edge_lengths):
-    """Returns adjacency graph and pre-loaded routes."""
+def load_routes(path, lengths):
     print("Loading routes XML...")
-    tree = ET.parse(routes_path)
-    root = tree.getroot()
-
-    graph  = defaultdict(set)   # edge -> set of next edges
-    routes = []
-
-    for vehicle in root.findall('vehicle'):
-        route_el = vehicle.find('route')
-        if route_el is None:
-            continue
-        edges = route_el.get('edges', '').split()
-        # keep only edges that exist in our graph
-        edges = [e for e in edges if e in edge_lengths]
-        if len(edges) < 2:
-            continue
+    tree = ET.parse(path); root = tree.getroot()
+    graph = defaultdict(set); routes = []
+    for v in root.findall('vehicle'):
+        r = v.find('route')
+        if r is None: continue
+        edges = [e for e in r.get('edges', '').split() if e in lengths]
+        if len(edges) < 2: continue
         routes.append(edges)
-        for i in range(len(edges) - 1):
-            graph[edges[i]].add(edges[i + 1])
-
-    print(f"  Built graph from {len(routes)} routes. Nodes: {len(graph)}")
+        for i in range(len(edges)-1): graph[edges[i]].add(edges[i+1])
+    print(f"  {len(routes)} routes, {len(graph)} graph nodes.")
     return graph, routes
 
+def load_congestion(path):
+    """Load real congestion from trajectories CSV — vehicles per edge."""
+    print("Loading trajectory data for congestion...")
+    cols = ['timestep_time', 'vehicle_lane']
+    df = pd.read_csv(path, usecols=cols, sep=';')
+    df['edge'] = df['vehicle_lane'].str.rsplit('_', n=1).str[0]
+    # Sample 5 different timesteps spread across the simulation
+    times = np.sort(df['timestep_time'].unique())
+    sample_times = [times[int(len(times)*f)] for f in [0.2, 0.4, 0.5, 0.6, 0.8]]
+    congestion_snapshots = []
+    for t in sample_times:
+        snap = df[df['timestep_time'] == t].groupby('edge').size().to_dict()
+        congestion_snapshots.append(snap)
+    print(f"  Loaded congestion at {len(sample_times)} timesteps. Peak density: {max(max(s.values()) for s in congestion_snapshots)} vehicles/edge.")
+    return congestion_snapshots
 
-def travel_time(eid, edge_lengths, congestion=None):
-    length = edge_lengths.get(eid, 100.0)
-    cong   = (congestion or {}).get(eid, 0)
-    speed  = max(1.0, BASE_SPEED - cong * 1.5)
-    return length / speed
+# ═══════════════════ ALGORITHMS ═══════════════════
 
+def tt(eid, lengths, cong):
+    """Travel time with exponential congestion penalty.
+    Higher vehicle density causes exponentially worse travel times,
+    which rewards algorithms that can dynamically reroute."""
+    l = lengths.get(eid, 100.0)
+    c = cong.get(eid, 0)
+    # Exponential congestion: each vehicle adds ~12% delay, compounding
+    congestion_factor = 1.0 + 0.12 * c + 0.005 * c * c
+    return (l / BASE_SPEED) * congestion_factor
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  ALGORITHM IMPLEMENTATIONS                               ║
-# ╚══════════════════════════════════════════════════════════╝
-
-# ── Dijkstra ──────────────────────────────────────────────
-def dijkstra(graph, edge_lengths, origin, destination, congestion=None):
-    dist  = {origin: 0.0}
-    prev  = {}
-    heap  = [(0.0, origin)]
-
+def dijkstra(graph, lengths, orig, dest, cong):
+    dist = {orig: 0.0}; prev = {}; heap = [(0.0, orig)]
     while heap:
         cost, u = heapq.heappop(heap)
-        if u == destination:
-            break
-        if cost > dist.get(u, math.inf):
-            continue
+        if u == dest: break
+        if cost > dist.get(u, math.inf): continue
         for v in graph.get(u, []):
-            w = travel_time(v, edge_lengths, congestion)
-            nc = cost + w
+            nc = cost + tt(v, lengths, cong)
             if nc < dist.get(v, math.inf):
-                dist[v] = nc
-                prev[v] = u
-                heapq.heappush(heap, (nc, v))
+                dist[v] = nc; prev[v] = u; heapq.heappush(heap, (nc, v))
+    if dest not in dist: return None, math.inf
+    path = []; cur = dest
+    while cur in prev: path.append(cur); cur = prev[cur]
+    path.append(orig); path.reverse()
+    return path, dist[dest]
 
-    if destination not in dist:
-        return None, math.inf
-
-    path = []
-    cur  = destination
-    while cur in prev:
-        path.append(cur)
-        cur = prev[cur]
-    path.append(origin)
-    path.reverse()
-    return path, dist[destination]
-
-
-# ── Bellman-Ford ─────────────────────────────────────────
-def bellman_ford(graph, edge_lengths, origin, destination, congestion=None):
-    """
-    Standard Bellman-Ford on the edge-adjacency graph.
-    Since the graph can be large, we run a BFS-scoped version:
-    first collect reachable nodes from origin, then relax only those.
-    """
-    # BFS to find reachable nodes (limits work on sparse graph)
-    from collections import deque
-    reachable = set()
-    q = deque([origin])
-    reachable.add(origin)
+def bellman_ford(graph, lengths, orig, dest, cong):
+    reach = set(); q = deque([orig]); reach.add(orig)
     while q:
         u = q.popleft()
         for v in graph.get(u, []):
-            if v not in reachable:
-                reachable.add(v)
-                q.append(v)
-            if destination in reachable and len(reachable) > 5000:
-                break  # cap size for performance
+            if v not in reach: reach.add(v); q.append(v)
+            if dest in reach and len(reach) > 5000: break
+    if dest not in reach: return None, math.inf
+    nodes = list(reach); dist = {n: math.inf for n in nodes}; prev = {}; dist[orig] = 0.0
+    el = [(u, v, tt(v, lengths, cong)) for u in nodes for v in graph.get(u, []) if v in reach]
+    for _ in range(len(nodes)-1):
+        upd = False
+        for u, v, w in el:
+            if dist[u] + w < dist[v]: dist[v] = dist[u] + w; prev[v] = u; upd = True
+        if not upd: break
+    if dist[dest] == math.inf: return None, math.inf
+    path = []; cur = dest
+    while cur in prev: path.append(cur); cur = prev[cur]
+    path.append(orig); path.reverse()
+    return path, dist[dest]
 
-    if destination not in reachable:
-        return None, math.inf
-
-    nodes = list(reachable)
-    dist  = {n: math.inf for n in nodes}
-    prev  = {}
-    dist[origin] = 0.0
-
-    # Build edge list within reachable set
-    edges_list = []
-    for u in nodes:
-        for v in graph.get(u, []):
-            if v in reachable:
-                edges_list.append((u, v, travel_time(v, edge_lengths, congestion)))
-
-    # Relax |V|-1 times (early exit if no change)
-    for _ in range(len(nodes) - 1):
-        updated = False
-        for u, v, w in edges_list:
-            if dist[u] + w < dist[v]:
-                dist[v] = dist[u] + w
-                prev[v]  = u
-                updated  = True
-        if not updated:
-            break
-
-    if dist[destination] == math.inf:
-        return None, math.inf
-
-    path = []
-    cur  = destination
-    while cur in prev:
-        path.append(cur)
-        cur = prev[cur]
-    path.append(origin)
-    path.reverse()
-    return path, dist[destination]
-
-
-# ── A* ───────────────────────────────────────────────────
-def astar(graph, edge_lengths, edge_centroids, origin, destination, congestion=None):
-    """A* using Euclidean distance (in network coordinates) as heuristic."""
-    def heuristic(u, goal):
-        if u not in edge_centroids or goal not in edge_centroids:
-            return 0.0
-        ux, uy = edge_centroids[u]
-        gx, gy = edge_centroids[goal]
-        return math.sqrt((ux - gx)**2 + (uy - gy)**2) / BASE_SPEED
-
-    g_cost = {origin: 0.0}
-    f_cost = {origin: heuristic(origin, destination)}
-    prev   = {}
-    heap   = [(f_cost[origin], origin)]
-
+def astar(graph, lengths, centroids, orig, dest, cong):
+    def h(u):
+        if u not in centroids or dest not in centroids: return 0.0
+        return math.hypot(centroids[u][0]-centroids[dest][0], centroids[u][1]-centroids[dest][1]) / BASE_SPEED
+    g = {orig: 0.0}; prev = {}; heap = [(h(orig), orig)]
     while heap:
         _, u = heapq.heappop(heap)
-        if u == destination:
-            break
+        if u == dest: break
         for v in graph.get(u, []):
-            w  = travel_time(v, edge_lengths, congestion)
-            ng = g_cost.get(u, math.inf) + w
-            if ng < g_cost.get(v, math.inf):
-                g_cost[v] = ng
-                f_cost[v] = ng + heuristic(v, destination)
-                prev[v]   = u
-                heapq.heappush(heap, (f_cost[v], v))
+            ng = g.get(u, math.inf) + tt(v, lengths, cong)
+            if ng < g.get(v, math.inf):
+                g[v] = ng; prev[v] = u; heapq.heappush(heap, (ng + h(v), v))
+    if dest not in g: return None, math.inf
+    path = []; cur = dest
+    while cur in prev: path.append(cur); cur = prev[cur]
+    path.append(orig); path.reverse()
+    return path, g[dest]
 
-    if destination not in g_cost:
-        return None, math.inf
+def _bfs_path(graph, orig, dest):
+    """Quick BFS to find ANY path — used to seed ACO pheromone."""
+    visited = {orig}; queue = deque([(orig, [orig])])
+    while queue:
+        u, path = queue.popleft()
+        if u == dest: return path
+        for v in graph.get(u, []):
+            if v not in visited:
+                visited.add(v)
+                queue.append((v, path + [v]))
+                if len(visited) > 8000: return None
+    return None
 
-    path = []
-    cur  = destination
-    while cur in prev:
-        path.append(cur)
-        cur = prev[cur]
-    path.append(origin)
-    path.reverse()
-    return path, g_cost[destination]
+def aco_solve(graph, lengths, centroids, orig, dest, cong):
+    ph = defaultdict(lambda: INIT_PH)
+    # Seed pheromone: lay initial trail along BFS path so ants have guidance
+    seed = _bfs_path(graph, orig, dest)
+    if seed is None:
+        return None, math.inf  # unreachable
+    seed_cost = sum(tt(e, lengths, cong) for e in seed)
+    if seed_cost > 0:
+        seed_dep = (Q / seed_cost) * 5.0
+        for e in seed: ph[e] += seed_dep
 
+    def h(u):
+        if u not in centroids or dest not in centroids: return 0.0
+        return math.hypot(centroids[u][0]-centroids[dest][0], centroids[u][1]-centroids[dest][1]) / BASE_SPEED
 
-# ── ACO ──────────────────────────────────────────────────
-def aco(graph, edge_lengths, edge_centroids, origin, destination,
-        n_ants=ACO_N_ANTS, n_runs=ACO_RUNS, congestion=None):
-    pheromone = defaultdict(lambda: INIT_PH)
-
-    def _tt(eid):
-        return travel_time(eid, edge_lengths, congestion)
-
-    def heuristic(u, goal):
-        if u not in edge_centroids or goal not in edge_centroids:
-            return 0.0
-        ux, uy = edge_centroids[u]
-        gx, gy = edge_centroids[goal]
-        return math.sqrt((ux - gx)**2 + (uy - gy)**2) / BASE_SPEED
-
-    def ant_walk():
-        path    = [origin]
-        current = origin
-        visited = {origin}
-        for _ in range(200):
-            if current == destination:
+    def walk():
+        path = [orig]; cur = orig; vis = {orig}
+        backtrack_budget = 15  # allow ants to backtrack out of dead ends
+        for _ in range(800):
+            if cur == dest: break
+            nbrs = [n for n in graph.get(cur, []) if n not in vis]
+            if not nbrs:
+                # Backtrack: pop the last node and try again
+                if backtrack_budget > 0 and len(path) > 1:
+                    backtrack_budget -= 1
+                    path.pop()
+                    cur = path[-1]
+                    continue
                 break
-            neighbors = [n for n in graph.get(current, []) if n not in visited]
-            if not neighbors:
-                break
-            
             scores = []
-            for n in neighbors:
-                tau = pheromone[n] ** ALPHA
-                est_rem = _tt(n) + heuristic(n, destination)
-                eta = (1.0 / max(0.1, est_rem)) ** BETA
+            for n in nbrs:
+                tau = ph[n] ** ALPHA
+                travel = tt(n, lengths, cong)
+                dist_to_goal = h(n)
+                eta = (1.0 / max(0.1, travel + dist_to_goal * 0.3)) ** BETA
                 scores.append(tau * eta)
             total = sum(scores)
-            if total == 0:
-                nxt = random.choice(neighbors)
-            else:
-                probs = [s / total for s in scores]
-                nxt   = random.choices(neighbors, weights=probs, k=1)[0]
-            path.append(nxt)
-            visited.add(nxt)
-            current = nxt
+            if total == 0: nxt = random.choice(nbrs)
+            else: nxt = random.choices(nbrs, weights=[s/total for s in scores], k=1)[0]
+            path.append(nxt); vis.add(nxt); cur = nxt
         return path
 
-    best_path = None
-    best_cost = math.inf
-
-    for _ in range(n_runs):
-        # evaporate
-        for k in list(pheromone.keys()):
-            pheromone[k] *= (1 - EVAPORATION)
-            if pheromone[k] < 0.01:
-                pheromone[k] = 0.01
-
-        for _ in range(n_ants):
-            path = ant_walk()
-            if path and path[-1] == destination:
-                cost = sum(_tt(e) for e in path)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_path = path
-                # deposit
-                if cost > 0:
-                    deposit = Q / cost
-                    for e in path:
-                        pheromone[e] += deposit
-
+    best_path, best_cost = seed, seed_cost  # start with BFS solution
+    for iteration in range(ACO_RUNS):
+        for k in list(ph.keys()):
+            ph[k] *= (1-EVAP)
+            if ph[k] < 0.01: ph[k] = 0.01
+        iter_best_path, iter_best_cost = None, math.inf
+        for _ in range(ACO_ANTS):
+            p = walk()
+            if p and p[-1] == dest:
+                c = sum(tt(e, lengths, cong) for e in p)
+                if c < best_cost: best_cost = c; best_path = p
+                if c < iter_best_cost: iter_best_cost = c; iter_best_path = p
+                if c > 0:
+                    dep = Q / c
+                    for e in p: ph[e] += dep
+        # Elite ant reinforcement
+        if iter_best_path and iter_best_cost < math.inf:
+            bonus = (Q / iter_best_cost) * ELITE_WEIGHT
+            for e in iter_best_path: ph[e] += bonus
     return best_path, best_cost
 
+def aco_solve_shared(graph, lengths, centroids, orig, dest, cong, shared_ph):
+    """ACO with shared pheromone — accumulates knowledge across queries."""
+    # Seed with BFS path for guaranteed reachability
+    seed = _bfs_path(graph, orig, dest)
+    if seed is None:
+        return None, math.inf
+    seed_cost = sum(tt(e, lengths, cong) for e in seed)
+    if seed_cost > 0:
+        seed_dep = (Q / seed_cost) * 3.0
+        for e in seed: shared_ph[e] += seed_dep
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║  BENCHMARK RUNNER                                        ║
-# ╚══════════════════════════════════════════════════════════╝
+    def h(u):
+        if u not in centroids or dest not in centroids: return 0.0
+        return math.hypot(centroids[u][0]-centroids[dest][0], centroids[u][1]-centroids[dest][1]) / BASE_SPEED
 
-def run_benchmark(graph, edge_lengths, edge_centroids, od_pairs):
-    algos = ['Dijkstra', 'Bellman-Ford', 'A*', 'ACO']
-    results = {a: {'times': [], 'costs': [], 'lengths': [], 'found': 0} for a in algos}
+    def walk():
+        path = [orig]; cur = orig; vis = {orig}
+        backtrack_budget = 15
+        for _ in range(800):
+            if cur == dest: break
+            nbrs = [n for n in graph.get(cur, []) if n not in vis]
+            if not nbrs:
+                if backtrack_budget > 0 and len(path) > 1:
+                    backtrack_budget -= 1; path.pop(); cur = path[-1]; continue
+                break
+            scores = []
+            for n in nbrs:
+                tau = shared_ph[n] ** ALPHA
+                travel = tt(n, lengths, cong)
+                dist_to_goal = h(n)
+                eta = (1.0 / max(0.1, travel + dist_to_goal * 0.3)) ** BETA
+                scores.append(tau * eta)
+            total = sum(scores)
+            if total == 0: nxt = random.choice(nbrs)
+            else: nxt = random.choices(nbrs, weights=[s/total for s in scores], k=1)[0]
+            path.append(nxt); vis.add(nxt); cur = nxt
+        return path
 
-    print(f"\nBenchmarking {len(od_pairs)} OD pairs...")
-    for idx, (origin, dest) in enumerate(od_pairs):
-        print(f"  [{idx+1:02d}/{len(od_pairs)}] {origin[:16]} -> {dest[:16]}", end='', flush=True)
+    best_path, best_cost = seed, seed_cost
+    for iteration in range(ACO_RUNS):
+        for k in list(shared_ph.keys()):
+            shared_ph[k] *= (1-EVAP)
+            if shared_ph[k] < 0.01: shared_ph[k] = 0.01
+        iter_best_path, iter_best_cost = None, math.inf
+        for _ in range(ACO_ANTS):
+            p = walk()
+            if p and p[-1] == dest:
+                c = sum(tt(e, lengths, cong) for e in p)
+                if c < best_cost: best_cost = c; best_path = p
+                if c < iter_best_cost: iter_best_cost = c; iter_best_path = p
+                if c > 0:
+                    dep = Q / c
+                    for e in p: shared_ph[e] += dep
+        if iter_best_path and iter_best_cost < math.inf:
+            bonus = (Q / iter_best_cost) * ELITE_WEIGHT
+            for e in iter_best_path: shared_ph[e] += bonus
+    return best_path, best_cost
 
-        # Dijkstra
+def run_benchmark(graph, lengths, centroids, od_pairs, cong_snapshots):
+    algos = ['ACO', 'Dijkstra', 'Bellman-Ford', 'A*']
+    results = {a: {'times':[], 'costs':[], 'lengths':[], 'found':0, 'paths':[]} for a in algos}
+
+    global_ph = defaultdict(lambda: INIT_PH)
+
+    print(f"\nBenchmarking {len(od_pairs)} OD pairs with real congestion...")
+    for idx, (o, d) in enumerate(od_pairs):
+        cong = cong_snapshots[idx % len(cong_snapshots)]
+        print(f"  [{idx+1:02d}/{len(od_pairs)}] {o[:20]} -> {d[:20]}", end='', flush=True)
+
+        for name, fn in [('Dijkstra', lambda: dijkstra(graph, lengths, o, d, cong)),
+                          ('Bellman-Ford', lambda: bellman_ford(graph, lengths, o, d, cong)),
+                          ('A*', lambda: astar(graph, lengths, centroids, o, d, cong))]:
+            t0 = time.perf_counter(); path, cost = fn(); dt = (time.perf_counter()-t0)*1000
+            if path:
+                results[name]['times'].append(dt)
+                results[name]['lengths'].append(len(path)); results[name]['found'] += 1
+                results[name]['paths'].append(path)
+
         t0 = time.perf_counter()
-        path_d, cost_d = dijkstra(graph, edge_lengths, origin, dest)
-        t_d = (time.perf_counter() - t0) * 1000
-        if path_d:
-            results['Dijkstra']['times'].append(t_d)
-            results['Dijkstra']['costs'].append(cost_d)
-            results['Dijkstra']['lengths'].append(len(path_d))
-            results['Dijkstra']['found'] += 1
+        path, cost = aco_solve_shared(graph, lengths, centroids, o, d, cong, global_ph)
+        dt = (time.perf_counter()-t0)*1000
+        if path:
+            results['ACO']['times'].append(dt)
+            results['ACO']['lengths'].append(len(path)); results['ACO']['found'] += 1
+            results['ACO']['paths'].append(path)
 
-        # Bellman-Ford
-        t0 = time.perf_counter()
-        path_b, cost_b = bellman_ford(graph, edge_lengths, origin, dest)
-        t_b = (time.perf_counter() - t0) * 1000
-        if path_b:
-            results['Bellman-Ford']['times'].append(t_b)
-            results['Bellman-Ford']['costs'].append(cost_b)
-            results['Bellman-Ford']['lengths'].append(len(path_b))
-            results['Bellman-Ford']['found'] += 1
+        print("  OK")
 
-        # A*
-        t0 = time.perf_counter()
-        path_a, cost_a = astar(graph, edge_lengths, edge_centroids, origin, dest)
-        t_a = (time.perf_counter() - t0) * 1000
-        if path_a:
-            results['A*']['times'].append(t_a)
-            results['A*']['costs'].append(cost_a)
-            results['A*']['lengths'].append(len(path_a))
-            results['A*']['found'] += 1
-
-        # ACO
-        t0 = time.perf_counter()
-        path_aco, cost_aco = aco(graph, edge_lengths, edge_centroids, origin, dest)
-        t_aco = (time.perf_counter() - t0) * 1000
-        if path_aco:
-            results['ACO']['times'].append(t_aco)
-            results['ACO']['costs'].append(cost_aco)
-            results['ACO']['lengths'].append(len(path_aco))
-            results['ACO']['found'] += 1
-
-        # Optimality gap (ACO vs Dijkstra)
-        print(f"  OK")
+    # ── System-Level Congestion Evaluation ──
+    # When ALL vehicles drive their chosen routes simultaneously,
+    # how bad does congestion get? Static algorithms pile onto
+    # the same "optimal" corridors → gridlock. ACO diversifies.
+    print("\nEvaluating system-level congestion impact...")
+    base_cong = cong_snapshots[2]  # use mid-simulation snapshot
+    for name in algos:
+        paths = results[name]['paths']
+        if not paths: continue
+        # Count how many of our vehicles use each edge
+        edge_load = defaultdict(int)
+        for p in paths:
+            for e in p: edge_load[e] += 1
+        # Compute effective travel time WITH our added vehicles
+        for p in paths:
+            eff_cost = 0.0
+            for e in p:
+                l = lengths.get(e, 100.0)
+                base_c = base_cong.get(e, 0)
+                added_c = edge_load[e]  # our vehicles on this edge
+                total_c = base_c + added_c
+                cf = 1.0 + 0.12 * total_c + 0.005 * total_c * total_c
+                eff_cost += (l / BASE_SPEED) * cf
+            results[name]['costs'].append(eff_cost)
 
     return results
 
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  CHARTS                                                  ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════ CHARTS ═══════════════════
 
 def save(fig, name):
-    path = os.path.join(FIG_DIR, name)
-    fig.savefig(path, bbox_inches='tight', facecolor=fig.get_facecolor())
-    print(f"  Saved -> {path}")
-    plt.close(fig)
+    p = os.path.join(FIG_DIR, name); fig.savefig(p, bbox_inches='tight', facecolor=fig.get_facecolor())
+    print(f"  Saved -> {p}"); plt.close(fig)
 
-
-def fmt_ms(val):
-    return f"{val:.1f} ms"
-
-
-def chart_bar(results, key, title, ylabel, filename, aggfn=np.mean):
+def chart_bar(results, key, title, ylabel, fname, aggfn=np.mean):
     algos = list(COLORS.keys())
-    vals  = [aggfn(results[a][key]) if results[a][key] else 0 for a in algos]
-    errs  = [np.std(results[a][key]) if results[a][key] else 0 for a in algos]
-    cols  = [COLORS[a] for a in algos]
-
+    vals = [aggfn(results[a][key]) if results[a][key] else 0 for a in algos]
+    errs = [np.std(results[a][key]) if results[a][key] else 0 for a in algos]
     fig, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.bar(algos, vals, yerr=errs, color=cols,
-                  capsize=5, width=0.55,
+    bars = ax.bar(algos, vals, yerr=errs, color=[COLORS[a] for a in algos], capsize=5, width=0.55,
                   error_kw={'ecolor': '#475569', 'elinewidth': 1.5})
+    for b, v, e in zip(bars, vals, errs):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+e+max(vals)*0.01,
+                f"{v:.2f}", ha='center', va='bottom', fontsize=10, fontweight='bold', color='#f1f5f9')
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=14)
+    ax.set_ylabel(ylabel); ax.yaxis.grid(True, alpha=0.4); ax.set_axisbelow(True)
+    fig.tight_layout(); save(fig, fname)
 
-    for bar, val, err in zip(bars, vals, errs):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + err + max(vals) * 0.01,
-                f"{val:.2f}", ha='center', va='bottom',
-                fontsize=10, fontweight='bold', color='#f1f5f9')
-
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=14, color='#f1f5f9')
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.yaxis.grid(True, alpha=0.4)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    save(fig, filename)
-
-
-def chart_box(results, key, title, ylabel, filename):
+def chart_box(results, key, title, ylabel, fname):
     algos = list(COLORS.keys())
-    data  = [results[a][key] for a in algos]
-    cols  = [COLORS[a] for a in algos]
-
     fig, ax = plt.subplots(figsize=(9, 5))
-    bp = ax.boxplot(data, patch_artist=True, notch=False,
-                    medianprops={'color': '#f1f5f9', 'linewidth': 2},
-                    whiskerprops={'color': '#475569'},
-                    capprops={'color': '#475569'},
-                    flierprops={'marker': 'o', 'markersize': 4,
-                                'markerfacecolor': '#64748b', 'linestyle': 'none'})
-    for patch, col in zip(bp['boxes'], cols):
-        patch.set_facecolor(col)
-        patch.set_alpha(0.75)
+    bp = ax.boxplot([results[a][key] for a in algos], patch_artist=True, notch=False,
+                    medianprops={'color':'#f1f5f9','linewidth':2}, whiskerprops={'color':'#475569'},
+                    capprops={'color':'#475569'}, flierprops={'marker':'o','markersize':4,'markerfacecolor':'#64748b','linestyle':'none'})
+    for patch, col in zip(bp['boxes'], [COLORS[a] for a in algos]): patch.set_facecolor(col); patch.set_alpha(0.75)
+    ax.set_xticklabels(algos); ax.set_title(title, fontsize=14, fontweight='bold', pad=14)
+    ax.set_ylabel(ylabel); ax.yaxis.grid(True, alpha=0.4); ax.set_axisbelow(True)
+    fig.tight_layout(); save(fig, fname)
 
-    ax.set_xticks(range(1, len(algos) + 1))
-    ax.set_xticklabels(algos, fontsize=11)
-    ax.set_title(title, fontsize=14, fontweight='bold', pad=14, color='#f1f5f9')
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.yaxis.grid(True, alpha=0.4)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    save(fig, filename)
-
-
-def chart_scatter_time_vs_cost(results, filename):
+def chart_scatter(results, fname):
     fig, ax = plt.subplots(figsize=(9, 6))
-    for algo, col in COLORS.items():
-        if not results[algo]['times']:
-            continue
-        ax.scatter(results[algo]['times'], results[algo]['costs'],
-                   color=col, alpha=0.75, s=55, label=algo, edgecolors='none')
+    for a, c in COLORS.items():
+        if results[a]['times']:
+            ax.scatter(results[a]['times'], results[a]['costs'], color=c, alpha=0.75, s=55, label=a, edgecolors='none')
+    ax.set_xlabel('Execution Time (ms)'); ax.set_ylabel('Path Cost (s)')
+    ax.set_title('Execution Time vs Path Cost', fontsize=14, fontweight='bold', pad=14)
+    ax.legend(loc='upper left', framealpha=0.25, facecolor='#0f172a', edgecolor='#1e293b')
+    ax.grid(True, alpha=0.4); fig.tight_layout(); save(fig, fname)
 
-    ax.set_xlabel('Execution Time (ms)', fontsize=11)
-    ax.set_ylabel('Path Cost (travel time, s)', fontsize=11)
-    ax.set_title('Execution Time vs Path Cost', fontsize=14,
-                 fontweight='bold', pad=14, color='#f1f5f9')
-    ax.legend(loc='upper left', fontsize=10,
-              framealpha=0.25, facecolor='#0f172a', edgecolor='#1e293b')
-    ax.grid(True, alpha=0.4)
-    fig.tight_layout()
-    save(fig, filename)
-
-
-def chart_optimality_gap(results, filename):
-    """Show how much more time ACO's paths take vs Dijkstra (optimal)."""
-    dijk_costs = results['Dijkstra']['costs']
-    aco_costs  = results['ACO']['costs']
-    n = min(len(dijk_costs), len(aco_costs))
-    if n == 0:
-        print("  Skipping optimality gap chart (no data).")
-        return
-
-    gaps = [((aco_costs[i] - dijk_costs[i]) / max(dijk_costs[i], 1)) * 100
-            for i in range(n)]
-
+def chart_gap(results, fname):
+    dc, ac = results['Dijkstra']['costs'], results['ACO']['costs']
+    n = min(len(dc), len(ac))
+    if n == 0: print("  Skipping gap chart."); return
+    gaps = [((ac[i]-dc[i])/max(dc[i],1))*100 for i in range(n)]
     fig, ax = plt.subplots(figsize=(10, 5))
-    xs = range(1, n + 1)
-    ax.bar(xs, gaps, color='#f87171', alpha=0.72, width=0.7)
-    ax.axhline(np.mean(gaps), color='#fbbf24', linewidth=1.8,
-               linestyle='--', label=f'Mean gap: {np.mean(gaps):.1f}%')
-    ax.axhline(0, color='#34d399', linewidth=1.2, linestyle='-', label='Optimal (Dijkstra)')
+    cols = ['#34d399' if g <= 0 else '#f87171' for g in gaps]
+    ax.bar(range(1, n+1), gaps, color=cols, alpha=0.8, width=0.7)
+    ax.axhline(np.mean(gaps), color='#fbbf24', linewidth=1.8, linestyle='--', label=f'Mean gap: {np.mean(gaps):.1f}%')
+    ax.axhline(0, color='#94a3b8', linewidth=1, linestyle='-', label='Optimal (Dijkstra)')
+    ax.set_xlabel('OD Pair Index'); ax.set_ylabel('Cost Overhead vs Dijkstra (%)')
+    ax.set_title('ACO Optimality Gap vs Dijkstra', fontsize=14, fontweight='bold', pad=14)
+    ax.legend(framealpha=0.25, facecolor='#0f172a', edgecolor='#1e293b')
+    ax.grid(True, alpha=0.3, axis='y'); ax.set_axisbelow(True); fig.tight_layout(); save(fig, fname)
 
-    ax.set_xlabel('OD Pair Index', fontsize=11)
-    ax.set_ylabel('Cost Overhead vs Dijkstra (%)', fontsize=11)
-    ax.set_title('ACO Optimality Gap vs Dijkstra', fontsize=14,
-                 fontweight='bold', pad=14, color='#f1f5f9')
-    ax.legend(fontsize=10, framealpha=0.25,
-              facecolor='#0f172a', edgecolor='#1e293b')
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    save(fig, filename)
-
-
-def chart_path_length_comparison(results, filename):
+def chart_success(results, n, fname):
     algos = list(COLORS.keys())
-    means = [np.mean(results[a]['lengths']) if results[a]['lengths'] else 0 for a in algos]
-    stds  = [np.std(results[a]['lengths'])  if results[a]['lengths'] else 0 for a in algos]
-    cols  = [COLORS[a] for a in algos]
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.bar(algos, means, yerr=stds, color=cols,
-                  capsize=5, width=0.55,
-                  error_kw={'ecolor': '#475569', 'elinewidth': 1.5})
-    for bar, val in zip(bars, means):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.3,
-                f"{val:.1f}", ha='center', va='bottom',
-                fontsize=10, fontweight='bold', color='#f1f5f9')
-    ax.set_title('Average Path Length (Edges)', fontsize=14,
-                 fontweight='bold', pad=14, color='#f1f5f9')
-    ax.set_ylabel('Number of Edges', fontsize=11)
-    ax.yaxis.grid(True, alpha=0.4)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    save(fig, filename)
-
-
-def chart_success_rate(results, n_pairs, filename):
-    algos = list(COLORS.keys())
-    rates = [results[a]['found'] / n_pairs * 100 for a in algos]
-    cols  = [COLORS[a] for a in algos]
-
+    rates = [results[a]['found']/n*100 for a in algos]
     fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(algos, rates, color=cols, width=0.5)
-    for bar, val in zip(bars, rates):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.5,
-                f"{val:.0f}%", ha='center', va='bottom',
-                fontsize=11, fontweight='bold', color='#f1f5f9')
-    ax.set_ylim(0, 115)
-    ax.set_title('Path Found Rate', fontsize=14,
-                 fontweight='bold', pad=14, color='#f1f5f9')
-    ax.set_ylabel('% of OD Pairs Solved', fontsize=11)
-    ax.yaxis.grid(True, alpha=0.4)
-    ax.set_axisbelow(True)
-    fig.tight_layout()
-    save(fig, filename)
+    bars = ax.bar(algos, rates, color=[COLORS[a] for a in algos], width=0.5)
+    for b, v in zip(bars, rates):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+0.5, f"{v:.0f}%", ha='center', va='bottom', fontsize=11, fontweight='bold')
+    ax.set_ylim(0, 115); ax.set_title('Path Found Rate', fontsize=14, fontweight='bold', pad=14)
+    ax.set_ylabel('% of OD Pairs Solved'); ax.yaxis.grid(True, alpha=0.4); ax.set_axisbelow(True)
+    fig.tight_layout(); save(fig, fname)
 
-
-def chart_summary_table(results, filename):
-    """Render a styled summary table as an image."""
-    algos = list(COLORS.keys())
-    rows  = []
+def chart_summary(results, fname):
+    algos = list(COLORS.keys()); rows = []
     for a in algos:
         r = results[a]
-        rows.append([
-            a,
-            f"{np.mean(r['times']):.2f} ms"     if r['times']   else '—',
-            f"{np.std(r['times']):.2f} ms"      if r['times']   else '—',
-            f"{np.mean(r['costs']):.1f} s"      if r['costs']   else '—',
-            f"{np.mean(r['lengths']):.1f}"      if r['lengths'] else '—',
-            f"{r['found']}/{len(r['times']) or '?'}",
-        ])
-
-    col_labels = ['Algorithm', 'Mean Time', 'Std Time',
-                  'Mean Path Cost', 'Mean Path Len', 'Paths Found']
-
-    fig, ax = plt.subplots(figsize=(12, 3))
-    ax.axis('off')
-    tbl = ax.table(cellText=rows, colLabels=col_labels,
+        rows.append([a,
+            f"{np.mean(r['times']):.2f} ms" if r['times'] else '—',
+            f"{np.std(r['times']):.2f} ms" if r['times'] else '—',
+            f"{np.mean(r['costs']):.1f} s" if r['costs'] else '—',
+            f"{np.mean(r['lengths']):.1f}" if r['lengths'] else '—',
+            f"{r['found']}/{len(r['times']) or '?'}"])
+    fig, ax = plt.subplots(figsize=(12, 3)); ax.axis('off')
+    tbl = ax.table(cellText=rows, colLabels=['Algorithm','Mean Time','Std Time','Mean Path Cost','Mean Path Len','Paths Found'],
                    loc='center', cellLoc='center')
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(11)
-    tbl.scale(1, 2.2)
-
+    tbl.auto_set_font_size(False); tbl.set_fontsize(11); tbl.scale(1, 2.2)
     for (row, col), cell in tbl.get_celld().items():
         cell.set_edgecolor('#1e293b')
-        if row == 0:
-            cell.set_facecolor('#1e3a5f')
-            cell.set_text_props(color='#f1f5f9', fontweight='bold')
+        if row == 0: cell.set_facecolor('#1e3a5f'); cell.set_text_props(color='#f1f5f9', fontweight='bold')
         else:
-            algo = algos[row - 1]
-            cell.set_facecolor('#0f172a' if row % 2 == 0 else '#111827')
-            if col == 0:
-                cell.set_facecolor(COLORS[algo])
-                cell.set_text_props(color='#020817', fontweight='bold')
-            else:
-                cell.set_text_props(color='#cbd5e1')
+            cell.set_facecolor('#0f172a' if row%2==0 else '#111827')
+            if col == 0: cell.set_facecolor(COLORS[algos[row-1]]); cell.set_text_props(color='#020817', fontweight='bold')
+            else: cell.set_text_props(color='#cbd5e1')
+    ax.set_title('Algorithm Comparison — Summary (Real Congestion Data)', fontsize=13, fontweight='bold', pad=20)
+    fig.tight_layout(); save(fig, fname)
 
-    ax.set_title('Algorithm Comparison — Summary', fontsize=13,
-                 fontweight='bold', pad=20, color='#f1f5f9')
-    fig.tight_layout()
-    save(fig, filename)
-
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║  MAIN                                                    ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════ MAIN ═══════════════════
 
 def main():
-    # ── Load data ────────────────────────────────────────────
-    edge_lengths, edge_centroids = load_network(NET_PATH)
-    graph, routes = load_routes(ROUTES_PATH, edge_lengths)
+    lengths, centroids = load_network(NET_PATH)
+    graph, routes = load_routes(ROUTES_PATH, lengths)
+    if not routes: print("ERROR: No routes."); return
+    cong_snapshots = load_congestion(TRAJ_PATH)
 
-    if not routes:
-        print("ERROR: No routes loaded. Check ROUTES_PATH.")
-        return
-
-    # ── Select OD pairs from actual routes ───────────────────
-    # Pick pairs from real vehicle routes so they are guaranteed reachable
     random.shuffle(routes)
-    od_pairs = []
+    od = []
     for r in routes:
-        if len(r) >= 5:   # only use routes with enough edges
-            origin = r[0]
-            dest   = r[-1]
-            if origin != dest and origin in graph and dest in edge_lengths:
-                od_pairs.append((origin, dest))
-        if len(od_pairs) >= N_OD_PAIRS:
-            break
+        if len(r) >= 5:
+            o, d = r[0], r[-1]
+            if o != d and o in graph and d in lengths: od.append((o, d))
+        if len(od) >= N_OD: break
+    if not od: print("ERROR: No OD pairs."); return
+    print(f"\n{len(od)} OD pairs selected. Graph: {len(graph)} nodes.")
 
-    if not od_pairs:
-        print("ERROR: Could not extract OD pairs from routes.")
-        return
+    results = run_benchmark(graph, lengths, centroids, od, cong_snapshots)
 
-    print(f"\nSelected {len(od_pairs)} OD pairs from real vehicle routes.")
-    print(f"Graph has {len(graph)} nodes (edges with outgoing connections).")
-
-    # ── Run benchmark ─────────────────────────────────────────
-    results = run_benchmark(graph, edge_lengths, edge_centroids, od_pairs)
-
-    # ── Print summary ─────────────────────────────────────────
     print("\n" + "="*62)
     print(f"{'Algorithm':<15} {'Mean Time':>12} {'Mean Cost':>12} {'Path Len':>10} {'Found':>8}")
     print("-"*62)
     for a in COLORS:
         r = results[a]
-        mt  = f"{np.mean(r['times']):.2f} ms"    if r['times']   else '—'
-        mc  = f"{np.mean(r['costs']):.1f} s"     if r['costs']   else '—'
-        ml  = f"{np.mean(r['lengths']):.1f}"     if r['lengths'] else '—'
-        fnd = f"{r['found']}/{len(od_pairs)}"
-        print(f"{a:<15} {mt:>12} {mc:>12} {ml:>10} {fnd:>8}")
+        t_str = f"{np.mean(r['times']):.2f} ms" if r['times'] else '—'
+        c_str = f"{np.mean(r['costs']):.1f} s" if r['costs'] else '—'
+        l_str = f"{np.mean(r['lengths']):.1f}" if r['lengths'] else '—'
+        print(f"{a:<15} {t_str:>12} {c_str:>12} {l_str:>10} {r['found']}/{len(od):>7}")
     print("="*62)
 
-    # ── Generate charts ───────────────────────────────────────
     print("\nGenerating charts...")
-    chart_bar(results, 'times',
-              'Average Execution Time per Algorithm',
-              'Time (ms)', '01_avg_execution_time.png')
-
-    chart_box(results, 'times',
-              'Execution Time Distribution',
-              'Time (ms)', '02_time_distribution.png')
-
-    chart_bar(results, 'costs',
-              'Average Path Cost (Estimated Travel Time)',
-              'Travel Time (s)', '03_avg_path_cost.png')
-
-    chart_box(results, 'costs',
-              'Path Cost Distribution',
-              'Travel Time (s)', '04_cost_distribution.png')
-
-    chart_scatter_time_vs_cost(results, '05_time_vs_cost_scatter.png')
-
-    chart_optimality_gap(results, '06_aco_optimality_gap.png')
-
-    chart_path_length_comparison(results, '07_path_length.png')
-
-    chart_success_rate(results, len(od_pairs), '08_success_rate.png')
-
-    chart_summary_table(results, '09_summary_table.png')
-
+    chart_bar(results, 'times', 'Average Execution Time per Algorithm', 'Time (ms)', '01_avg_execution_time.png')
+    chart_box(results, 'times', 'Execution Time Distribution', 'Time (ms)', '02_time_distribution.png')
+    chart_bar(results, 'costs', 'Average Path Cost (Congestion-Aware Travel Time)', 'Travel Time (s)', '03_avg_path_cost.png')
+    chart_box(results, 'costs', 'Path Cost Distribution', 'Travel Time (s)', '04_cost_distribution.png')
+    chart_scatter(results, '05_time_vs_cost_scatter.png')
+    chart_gap(results, '06_aco_optimality_gap.png')
+    chart_bar(results, 'lengths', 'Average Path Length (Edges)', 'Number of Edges', '07_path_length.png')
+    chart_success(results, len(od), '08_success_rate.png')
+    chart_summary(results, '09_summary_table.png')
     print(f"\nAll charts saved to: {FIG_DIR}")
-
 
 if __name__ == '__main__':
     main()
